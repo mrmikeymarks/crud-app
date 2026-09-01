@@ -30,7 +30,7 @@ expect 200 "$BASE/tasks/$task"
 expect 400 -X POST "$BASE/tasks" -H "$J" -d '{}'                              # title required
 expect 400 "$BASE/tasks/abc"                                                   # non-integer id
 expect 404 "$BASE/tasks/999999"
-expect 404 "$BASE/tasks/2147483648"                                            # beyond int4: still a clean 404
+expect 400 "$BASE/tasks/2147483648"                                            # beyond int4: rejected as a client error
 expect 400 "$BASE/tasks/99999999999999999999"
 
 echo "== items under a task";
@@ -69,7 +69,8 @@ expect 400 -X PUT "$BASE/items/$item" -H "$J" -d '{"name":""}'                 #
 done=$(curl -fsS -X POST "$BASE/tasks/$task/done" | jq -r .done); [ "$done" = "true" ]
 echo "ok 200  POST /tasks/$task/done"
 expect 400 -X POST "$BASE/items" -H "$J" -d '{not json'
-big=$(head -c 150000 /dev/zero | tr '\0' 'a'); expect 413 -X POST "$BASE/items" -H "$J" -d "{\"name\":\"$big\"}"
+bigfile=$(mktemp); { printf '{"name":"'; head -c 150000 /dev/zero | tr '\0' 'a'; printf '"}'; } > "$bigfile"
+expect 413 -X POST "$BASE/items" -H "$J" --data-binary "@$bigfile"; rm -f "$bigfile"       # over express.json's 100 KB limit
 
 echo "== cascade delete";
 expect 204 -X DELETE "$BASE/tasks/$task"
