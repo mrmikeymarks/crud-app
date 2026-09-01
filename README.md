@@ -83,11 +83,32 @@ smaller attack surface.
 * **`services.db`**
   * `image: postgres:16-alpine` – official image, pinned major version.
   * `POSTGRES_*` – variables the official image uses to create the role and database on first boot.
-  * `volumes: pgdata:/var/lib/postgresql/data` – a **named volume** so data outlives the container.
+  * `volumes: pgdata:/var/lib/postgresql/data` – a **named volume** so data outlives the container. See *Where the data lives* below.
   * `volumes: ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro` – a **bind mount**; the image runs any `.sql` in that folder exactly once, when the data directory is empty.
   * `healthcheck: pg_isready` – what `service_healthy` above waits for.
   * No `ports:` – the DB is unreachable from outside the Docker network. Uncomment the block if you want to attach a GUI client.
 * **`volumes:` / `networks:`** – declare the named volume and the private bridge network the services reference.
+
+## Where the data lives
+
+The `pgdata` volume is a named volume, but `driver_opts` pins it to a host directory
+(`PGDATA_DIR` in `.env`, default `/home/mike/docker/data/crud-app/pgdata`) instead of
+Docker's internal `/var/lib/docker/volumes` location. You get the best of both:
+
+* Docker still creates the volume and fixes ownership for the Postgres user (uid 70).
+* The files sit in a path you control, so you can back them up, snapshot them, or move
+  them to another machine with ordinary host tools.
+
+The directory **must exist** before the first `docker compose up` (Docker will not
+create it for a `type: none` bind). Keep it outside the git repo. Note that
+`docker compose down -v` only removes Docker's *record* of the volume; the files on disk
+stay put, so wipe the directory yourself if you want a truly fresh database.
+
+For a consistent backup, dump rather than copy raw files:
+
+```bash
+docker compose exec db pg_dump -U app app | gzip > backup-$(date +%F).sql.gz
+```
 
 ## compose.override.yaml (development only)
 

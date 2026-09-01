@@ -53,9 +53,17 @@ services:
     # ports:
     #   - "127.0.0.1:5432:5432"
 
-# Named volumes are managed by Docker and live outside the project folder.
+# A named volume, but pinned to a host directory of our choosing instead of
+# Docker's default location. This keeps Docker's ownership/permission handling
+# while letting you back up or snapshot the files with normal host tools.
+# The directory must exist before the first `docker compose up`.
 volumes:
   pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PGDATA_DIR:-/home/mike/docker/data/crud-app/pgdata}
 
 # A private bridge network. Containers on it can reach each other by service name.
 networks:
