@@ -8,7 +8,7 @@ reference for how a typical containerised web app fits together.
 crud-app/
 ├── Dockerfile               # how to build the API image (multi-stage)
 ├── compose.yaml             # the stack: api + db, network, volume
-├── compose.override.yaml    # dev-only extras (live reload); auto-merged
+├── compose.override.yaml    # dev-only extras (live reload, Adminer, NocoDB); auto-merged
 ├── .env.example             # template for secrets/config -> copy to .env
 ├── .dockerignore            # what NOT to send into the image build
 ├── .gitignore
@@ -114,8 +114,31 @@ docker compose exec db pg_dump -U app app | gzip > backup-$(date +%F).sql.gz
 
 Compose merges `compose.override.yaml` on top of `compose.yaml` automatically. Here it
 bind-mounts `./src` into the container and swaps the command for `node --watch`, so
-editing a file on the host restarts the server inside the container. Pass
-`-f compose.yaml` explicitly to skip it.
+editing a file on the host restarts the server inside the container. It also adds the
+database GUIs described below. Pass `-f compose.yaml` explicitly to skip it.
+
+Note that the bind mount is a dev convenience only. The production image already
+contains a copy of `src` because the Dockerfile runs `COPY src ./src` at build time,
+so production never reads source from the host or from git at run time.
+
+## Database GUIs (development only)
+
+`compose.override.yaml` also starts two tools for looking at and editing the data.
+They are bound to `127.0.0.1` so they are never reachable from the network, and they
+are absent when you deploy with `-f compose.yaml`.
+
+| Tool | URL | What it is good for |
+|---|---|---|
+| Adminer | http://localhost:8080 | Quick SQL console and table browser. Log in with System **PostgreSQL**, Server `db`, and the user/password/database from `.env`. |
+| NocoDB | http://localhost:8081 | Airtable-style spreadsheet, forms, kanban and gallery views over the same tables. |
+
+NocoDB first-time setup: create the admin account, then **New base → Connect external
+data → PostgreSQL** with host `db`, port `5432`, and the user, password and database
+from `.env`. NocoDB stores its own metadata (accounts, bases, views) in the
+`nocodb_data` volume, separate from the application database.
+
+If you would rather start these only on demand, add `profiles: [tools]` to each
+service and run `docker compose --profile tools up`.
 
 ## .env and secrets
 
