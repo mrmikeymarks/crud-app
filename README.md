@@ -1,8 +1,10 @@
 # crud-app
 
 A minimal **Create / Read / Update / Delete** REST API (Node 22 + Express + PostgreSQL 16)
-packaged with **Docker Compose**. The config files are kept as small as possible; this
-README carries the explanation.
+packaged with **Docker Compose**, built to be called from a separate web app. Entities
+are declared as small config objects, a factory builds their routes, and the server
+auto-mounts every entity folder, so adding one is a folder and a migration. The config
+files are kept as small as possible; this README carries the explanation.
 
 ```
 crud-app/
@@ -14,10 +16,15 @@ crud-app/
 ├── .gitignore
 ├── package.json / package-lock.json
 ├── src/
-│   ├── server.js            # Express routes (the CRUD endpoints)
-│   └── db.js                # Postgres connection pool
-├── db/
-│   └── init.sql             # schema + seed rows, runs once on first DB start
+│   ├── server.js            # app setup, CORS, auto-mounts src/entities/*, migrations, shutdown
+│   ├── db.js                # Postgres connection pool
+│   ├── migrate.js           # migration runner (also `npm run migrate`)
+│   ├── lib/crud.js          # the CRUD router factory
+│   └── entities/
+│       ├── tasks/           # parent entity: config.js + routes.js (adds POST /tasks/:id/done)
+│       └── items/           # child entity: config.js + routes.js
+├── db/migrations/           # numbered .sql files applied in order at startup
+├── scripts/smoke.sh         # end-to-end API check, run by CI and `npm run smoke`
 ├── devproxy/
 │   └── Caddyfile            # optional authenticated gateway for the dev GUIs (disabled)
 └── .github/workflows/ci.yaml# GitHub Actions: build + smoke test the stack
@@ -40,10 +47,21 @@ docker compose -f compose.yaml up -d --build
 Try it:
 
 ```bash
-curl localhost:3000/items
-curl -X POST localhost:3000/items -H 'content-type: application/json' -d '{"name":"milk"}'
-curl -X PUT  localhost:3000/items/1 -H 'content-type: application/json' -d '{"description":"2 litres"}'
-curl -X DELETE localhost:3000/items/1
+curl localhost:3000/api                    # discovery: every entity and its path
+task=$(curl -s -X POST localhost:3000/api/tasks -H 'content-type: application/json' -d '{"title":"Weekly shop"}' | jq -r .id)
+item=$(curl -s -X POST localhost:3000/api/tasks/$task/items -H 'content-type: application/json' -d '{"name":"milk"}' | jq -r .id)
+curl localhost:3000/api/tasks/$task        # the task with its items embedded
+curl -X PUT  localhost:3000/api/items/$item -H 'content-type: application/json' -d '{"description":"2 litres"}'
+curl -X DELETE localhost:3000/api/tasks/$task  # cascades to its items
+```
+
+Ids are captured from the responses because a fresh database already holds two seed
+items (ids 1 and 2).
+
+Or run the full end-to-end check against the running stack (needs `curl` and `jq`):
+
+```bash
+npm run smoke
 ```
 
 Stop everything:
@@ -54,18 +72,152 @@ docker compose down
 
 ## API
 
+Every entity route lives under `API_PREFIX` (default `/api`); `/health` stays at the root.
+Two entities so far. A **task** (or reminder) is the parent; **items** are its children.
+An item's `task_id` may be null, so loose items are allowed.
+
 | Method | Path | Body | Result |
 |---|---|---|---|
 | GET | `/health` | | `{"status":"ok"}` when the DB answers, 503 otherwise |
-| POST | `/items` | `{"name","description?"}` | 201 with the new row |
-| GET | `/items` | | all rows |
-| GET | `/items/:id` | | one row or 404 |
-| PUT | `/items/:id` | `{"name?","description?"}` | updated row or 404 |
-| DELETE | `/items/:id` | | 204 or 404 |
+| GET | `/api` | | discovery: `{"entities": {name: {path, table, columns, required, parent}}}` |
+| GET | `/api/tasks` | | all tasks (paginated, see below) |
+| POST | `/api/tasks` | `{"title","due_at?","done?"}` | 201 with the new task |
+| GET | `/api/tasks/:id` | | the task **with `items: [...]` embedded**, or 404 |
+| PUT | `/api/tasks/:id` | any writable fields | updated task or 404 |
+| DELETE | `/api/tasks/:id` | | 204; **its items are deleted too** |
+| POST | `/api/tasks/:id/done` | | marks the task done (entity-specific route) |
+| GET | `/api/tasks/:id/items` | | the task's items, 404 if the task does not exist |
+| POST | `/api/tasks/:id/items` | `{"name","description?"}` | 201, `task_id` set from the URL |
+| GET | `/api/items` | | all items (paginated); `?task_id=N` filters to one task |
+| POST | `/api/items` | `{"name","description?","task_id?"}` | 201; 404 if `task_id` names no task |
+| GET | `/api/items/:id` | | one item or 404 |
+| PUT | `/api/items/:id` | any writable fields | partial update; set `task_id` to move or `null` to detach |
+| DELETE | `/api/items/:id` | | 204 or 404 |
 
-Every query is parameterised (`$1`, `$2`) so user input never reaches SQL as text.
-`src/server.js` also handles `SIGTERM`: it stops accepting connections, waits for
-in-flight requests, closes the DB pool, then exits, so `docker compose down` is clean.
+Rules that apply everywhere:
+
+* List routes accept `?limit=` (default 100, max 500) and `?offset=` (default 0) and
+  return the unpaginated total in an `X-Total-Count` response header.
+* `:id`, `limit`, `offset` and parent ids must be integers up to 2,147,483,647 (Postgres
+  `int4`), otherwise 400.
+* JSON bodies are limited to 100 KB (413 above that).
+* Fields not listed in the entity's `columns` are ignored; `required` fields must be
+  present on create and non-empty on update.
+* Bad values (a non-date in `due_at`, a non-boolean in `done`) come back as 400 with
+  the Postgres message. Foreign-key and uniqueness conflicts are 409. Invalid JSON is 400.
+* Every value is a query parameter (`$1`, `$2`); only identifiers from the entity config
+  are ever interpolated into SQL, and they are checked against `[a-z_][a-z0-9_]*`.
+
+## Entities and the CRUD factory
+
+Each entity lives in `src/entities/<name>/` with two files:
+
+* `config.js` declares the table and what clients may write:
+
+  ```js
+  export default {
+    table: "items",
+    columns: ["name", "description"],   // writable columns
+    required: ["name"],
+    parent: { table: "tasks", key: "task_id" },   // omit for a top-level entity
+  };
+  ```
+
+* `routes.js` turns that into a router, optionally with children and custom routes:
+
+  ```js
+  const router = crudRouter(tasks, { children: [items] });
+  router.post("/:id/done", wrap(async (req, res) => { ... }));
+  export default router;
+  ```
+
+`src/lib/crud.js` generates the five standard routes from the config. Passing `children`
+adds `GET/POST /:id/<child table>` and embeds each child list in `GET /:id` with a single
+`json_agg` query. `wrap` forwards rejected promises to the error handler, which Express 4
+does not do on its own.
+
+`src/server.js` scans `src/entities/` at startup and mounts each folder's `routes.js` at
+`API_PREFIX/<folder name>`, so the folder name is the URL path. It also reads each
+`config.js` to build the discovery response at `GET /api`.
+
+To add an entity, say `notes` under `tasks`:
+
+1. `db/migrations/003_notes.sql` creating the table with `task_id INTEGER REFERENCES
+   tasks(id) ON DELETE CASCADE` and an index on it.
+2. `src/entities/notes/config.js` with `parent: { table: "tasks", key: "task_id" }`.
+3. `src/entities/notes/routes.js` exporting `crudRouter(notes)`.
+4. Optionally add `notes` to the `children` list in `src/entities/tasks/routes.js` to get
+   `/api/tasks/:id/notes` and embedding. Restart the API; nothing in `server.js` changes.
+
+Keep entity-specific SQL out of the factory: put it in a `repo.js` next to the config and
+call it from a custom route, as `tasks/routes.js` does inline for `/done`.
+
+## Consuming the API from a separate web app
+
+The API is designed to sit behind a front end served from somewhere else (a Vite or
+Next dev server, a static host, a phone app).
+
+* **CORS.** `CORS_ORIGIN` controls which browser origins may call the API. `*` (the
+  default) is convenient for development. In production set it to the web app's exact
+  origin, or a comma-separated list. CORS is not authentication: it only tells browsers
+  which sites may read responses. The `X-Total-Count` header is exposed to browsers.
+* **Prefix.** Everything lives under `API_PREFIX` (`/api`), which makes it easy to put
+  the web app and the API behind one reverse proxy: `/` to the front end, `/api` here.
+  Doing that also removes the need for CORS at all. Caddy can do it in three lines.
+* **Discovery.** `GET /api` returns every entity with its path, writable columns,
+  required fields and parent relation. A front end can build forms from it.
+* **Errors.** Every error is `{"error": "message"}` with a meaningful status: 400 for
+  bad input, 404 for a missing row or parent, 409 for constraint conflicts, 500 only
+  for genuine failures.
+* **Pagination.** `?limit=&offset=` plus `X-Total-Count`, so a list view can show page
+  N of M.
+
+Minimal browser example:
+
+```js
+const API = "http://192.168.1.50:3000/api";
+const res = await fetch(`${API}/tasks?limit=20`);
+const total = res.headers.get("X-Total-Count");
+const tasks = await res.json();
+
+await fetch(`${API}/tasks/${tasks[0].id}/items`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ name: "milk" }),
+});
+```
+
+There is no authentication yet. Add it as one Express middleware in `server.js` before
+the entity mounts (an API key header, or a JWT check), and it protects every entity,
+present and future.
+
+## Migrations
+
+`db/migrations/*.sql` are applied in filename order (zero-pad the number: `001_`, `002_`)
+by `src/migrate.js`, which the server runs before it starts listening. You can also run it
+by hand:
+
+```bash
+docker compose exec api npm run migrate
+```
+
+How it works:
+
+* A `schema_migrations` table records each applied filename, so a file runs exactly once.
+* Each file runs inside its own transaction and is recorded in the same transaction, so a
+  failing migration leaves nothing half-applied and the server refuses to start.
+* A Postgres advisory lock serialises runners, so several API replicas starting at once
+  do not race.
+* Files are read from `db/migrations` inside the image (copied by the Dockerfile) or, in
+  dev, from the bind-mounted host folder. `node --watch` does not watch `.sql` files, so
+  restart the container after adding one: `docker compose restart api`.
+
+Migrations replace the old `init.sql` approach, which only ran on an empty data
+directory and could never change an existing database. `001_items.sql` is written to be
+safe on databases created by that older `init.sql`: it uses `CREATE TABLE IF NOT EXISTS`
+and seeds only an empty table.
+
+Migrations are forward-only. To undo one, write the next migration.
 
 ## Configuration (`.env`)
 
@@ -76,6 +228,8 @@ and docker-ignored; commit `.env.example` as documentation.
 |---|---|---|
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | db, api | The official Postgres image creates this role and database on first start. The API uses the same values to connect. |
 | `API_PORT` | api | Host port that maps to the API's port 3000. Default 3000. Published on **all interfaces** (IPv4 and IPv6) in both dev and production; see *Exposure*. |
+| `API_PREFIX` | api | URL prefix for entity routes. Default `/api`. Blank (or `/`) mounts them at `/`; leading and trailing slashes are normalised, so `api` and `/api/` both work. |
+| `CORS_ORIGIN` | api | Browser origins allowed to call the API. `*` (default) or a comma-separated list. |
 | `PGDATA_DIR` | db volume | Absolute host path holding the Postgres data files. **Must exist** before the first start. Required; Compose refuses to start without it. |
 | `GUI_BIND_ADDR` | dev GUIs | Host address Adminer and NocoDB listen on. `127.0.0.1` = this machine only. A LAN or VPN IP lets other devices in. |
 | `GUI_AUTH_USER` / `GUI_AUTH_HASH` | devproxy | Only needed if the optional Caddy gateway is enabled. |
@@ -93,6 +247,7 @@ and docker-ignored; commit `.env.example` as documentation.
 | `ENV NODE_ENV=production` | Express and many libraries switch off debug behaviour. |
 | `COPY --from=deps /app/node_modules ./node_modules` | Bring the installed packages across from stage 1. |
 | `COPY package.json ./` / `COPY src ./src` | The application. `.dockerignore` filters what is eligible. |
+| `COPY db/migrations ./db/migrations` | The migration runner reads these from inside the image, so a production server needs no source checkout. |
 | `USER node` | Drop root. The official image ships an unprivileged `node` user. |
 | `EXPOSE 3000` | Documentation only. The host mapping is `ports:` in `compose.yaml`. |
 | `HEALTHCHECK ... wget http://127.0.0.1:3000/health` | Docker marks the container healthy only when the API answers and can reach the DB. `127.0.0.1` rather than `localhost` because Alpine resolves `localhost` to `::1` first and node listens on IPv4 only. |
@@ -129,9 +284,8 @@ The production stack. No `version:` key is needed with Compose v2.
 
 * `image: postgres:16-alpine`, official image, pinned major version.
 * `POSTGRES_*` create the role and database on first boot.
-* `pgdata:/var/lib/postgresql/data` is the named volume holding the database.
-* `./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro` is a read-only bind mount. The
-  image runs any `.sql` in that folder exactly once, when the data directory is empty.
+* `pgdata:/var/lib/postgresql/data` is the named volume holding the database. The schema
+  is created by the API's migration runner, not by the database image.
 * `healthcheck: pg_isready` is what `service_healthy` waits for.
 * No `ports:`. The database is reachable only from containers on `backend`, never from
   the host or the network. Add `"127.0.0.1:5432:5432"` if you want a local GUI client.
@@ -173,9 +327,9 @@ docker compose exec db pg_dump -U app app | gzip > backup-$(date +%F).sql.gz
 Compose merges `compose.override.yaml` on top of `compose.yaml` automatically for plain
 `docker compose up`. Pass `-f compose.yaml` explicitly to skip it. It adds:
 
-**Live reload.** `./src` is bind-mounted read-only over the copy baked into the image,
-and the command becomes `node --watch`, so editing a file on the host restarts the
-server in the container. This is a dev convenience only: the production image already
+**Live reload.** `./src` and `./db/migrations` are bind-mounted read-only over the copies
+baked into the image, and the command becomes `node --watch`, so editing a source file on
+the host restarts the server in the container. This is a dev convenience only: the production image already
 contains `src` from the Dockerfile's `COPY`, and never reads source from the host or
 from git at run time.
 
@@ -261,10 +415,10 @@ The same files serve both; what changes is which of them are in play.
 | Step | What happens | DB-related files involved |
 |---|---|---|
 | 1. Develop | `docker compose up --build` merges the override: live reload, Adminer, NocoDB. Postgres data lands in `PGDATA_DIR` on your machine. | `.env` (your local password), `PGDATA_DIR` (your local data), `nocodb_data` volume |
-| 2. Commit | `git add` picks up code, `Dockerfile`, both Compose files, `db/init.sql`, `.env.example`. | `.gitignore` keeps `.env` out; the data directory is outside the repo |
+| 2. Commit | `git add` picks up code, `Dockerfile`, both Compose files, `db/migrations/`, `.env.example`. | `.gitignore` keeps `.env` out; the data directory is outside the repo |
 | 3. Push | GitHub Actions builds the image and smoke-tests the whole stack with a throw-away database on the runner. | CI writes its own `.env` from `.env.example` and its own temporary `PGDATA_DIR` |
 | 4. Deploy | On the server: clone, create a **new** `.env` with a real password, create `PGDATA_DIR`, run `docker compose -f compose.yaml up -d --build`. No override, so no GUIs and no bind mounts. | Server-side `.env` and `PGDATA_DIR`, created by hand, never in git |
-| 5. Update | Pull, rebuild, `up -d`. The image is replaced; the database volume is untouched. | `PGDATA_DIR` persists across image upgrades |
+| 5. Update | Pull, rebuild, `up -d`. The image is replaced; the database volume is untouched, and any new migrations run when the new API starts. | `PGDATA_DIR` persists across image upgrades |
 
 What stays hidden, and where:
 
@@ -273,13 +427,14 @@ What stays hidden, and where:
 | `.env` | No (`.gitignore`) | No (`.dockerignore`) | Holds the database password. Each environment has its own. |
 | `PGDATA_DIR` contents | No (outside the repo) | No | The actual database files. Data never travels through git or images; move it with `pg_dump` / `pg_restore`. |
 | `nocodb_data` volume | No | No | NocoDB accounts and views, dev only. |
-| `db/init.sql` | **Yes** | No (used by the `db` container via bind mount, not built into the API image) | Schema and seed rows. It is public in the repo, so keep real data out of it. |
+| `db/migrations/*.sql` | **Yes** | **Yes** (the API image applies them) | Schema and seed rows. Public in the repo, so keep real data out of them. |
 | `.env.example` | **Yes** | No | Placeholder values only. |
 | `compose*.yaml`, `Dockerfile` | **Yes** | No | Describe the stack; contain no secrets because everything sensitive is `${VAR}` from `.env`. |
 
 Two consequences worth remembering:
 
-* A fresh production server starts with an empty database seeded only by `db/init.sql`.
+* A fresh production server starts with an empty database; the migrations create the
+  schema and the two seed rows.
   To carry data over from dev, dump it there and restore it on the server:
 
   ```bash
@@ -299,16 +454,19 @@ For real deployments prefer Docker secrets or your platform's secret store to a 
 
 `.github/workflows/ci.yaml` runs on every push to `main` and on every pull request. It copies
 `.env.example` to `.env`, points `PGDATA_DIR` at a runner-local directory, builds the
-image, starts the stack with `--wait` (blocks until healthchecks pass), exercises every
-CRUD endpoint with `curl`, prints logs on failure and tears down.
+image, starts the stack with `--wait` (blocks until healthchecks pass), runs
+`scripts/smoke.sh` against it, prints logs on failure and tears down. The smoke script
+covers every route in the API table, including discovery, CORS headers, pagination,
+validation errors, the nested routes, the embedded children and the cascade delete.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | `set PGDATA_DIR in .env` error | `.env` is missing or lacks `PGDATA_DIR`. Copy `.env.example`. |
-| `failed to mount local volume ... no such file or directory` | `PGDATA_DIR` does not exist on the host. `mkdir -p` it. |
+| `failed to mount local volume ... no such file or directory` | `PGDATA_DIR` does not exist on the host. `mkdir -p` it. On **Docker Desktop** the same error can appear for a directory created seconds earlier, because the Desktop VM has not noticed it yet; paths outside the shared folders (such as `/tmp`) can never be used. Wait a moment or restart Docker Desktop. |
 | `cannot assign requested address` | `GUI_BIND_ADDR` is not an IP of this machine any more (DHCP changed it). Fix `.env` or reserve the IP. |
 | Changed `PGDATA_DIR` but data still goes to the old place | Compose keeps existing volumes. `docker compose -f compose.yaml down -v`, then `up`. |
 | API container `unhealthy`, `wget: can't connect` | Healthcheck must use `127.0.0.1`, not `localhost`, on Alpine. |
-| `init.sql` changes have no effect | It only runs on an empty data directory. Apply changes with Adminer or `psql`, or wipe the directory. |
+| API exits with `migration 00N_... failed` | The SQL in that file errored; nothing from it was applied. Fix the file and restart. Never edit an already-applied migration; add a new one. |
+| Added a migration but nothing happened | `node --watch` ignores `.sql` files. `docker compose restart api`. |

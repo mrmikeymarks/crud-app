@@ -10,6 +10,5 @@ compose*.yaml
 Dockerfile
 .dockerignore
 .github
-db
 devproxy
 data

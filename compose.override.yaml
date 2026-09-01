@@ -4,6 +4,7 @@ services:
   api:
     volumes:
       - ./src:/app/src:ro
+      - ./db/migrations:/app/db/migrations:ro
     command: ["node", "--watch", "src/server.js"]
     environment:
       NODE_ENV: development

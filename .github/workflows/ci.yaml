@@ -24,20 +24,8 @@ jobs:
       - name: Build image and start stack
         run: docker compose -f compose.yaml up -d --build --wait
 
-      - name: Smoke test CRUD endpoints
-        run: |
-          set -eux
-          curl -fsS localhost:3000/health
-          curl -fsS localhost:3000/items
-          id=$(curl -fsS -X POST localhost:3000/items \
-                -H 'content-type: application/json' \
-                -d '{"name":"ci item"}' | jq -r .id)
-          curl -fsS localhost:3000/items/$id
-          curl -fsS -X PUT localhost:3000/items/$id \
-                -H 'content-type: application/json' \
-                -d '{"description":"updated"}'
-          curl -fsS -X DELETE localhost:3000/items/$id
-          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/items/$id)" = "404"
+      - name: Smoke test the API (tasks, items, nested routes)
+        run: bash scripts/smoke.sh
 
       - name: Show logs on failure
         if: failure()

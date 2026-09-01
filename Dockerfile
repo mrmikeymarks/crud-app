@@ -12,6 +12,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
+COPY db/migrations ./db/migrations
 USER node
 EXPOSE 3000
 # 127.0.0.1 rather than localhost: Alpine resolves localhost to ::1 first, node listens on IPv4 only.
