@@ -1,0 +1,12 @@
+# Compose automatically merges this file on top of compose.yaml when you run
+# plain `docker compose up`. It is for LOCAL DEVELOPMENT only. In production
+# run `docker compose -f compose.yaml up -d` to ignore it.
+services:
+  api:
+    # Bind-mount source so edits on the host are seen inside the container...
+    volumes:
+      - ./src:/app/src:ro
+    # ...and use node's --watch flag to restart on change.
+    command: ["node", "--watch", "src/server.js"]
+    environment:
+      NODE_ENV: development

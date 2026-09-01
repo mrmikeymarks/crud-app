@@ -1,0 +1,40 @@
+# Builds the image and smoke-tests the full stack on every push / PR.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env for CI
+        run: cp .env.example .env
+
+      - name: Build image and start stack
+        run: docker compose -f compose.yaml up -d --build --wait
+
+      - name: Smoke test CRUD endpoints
+        run: |
+          set -eux
+          curl -fsS localhost:3000/health
+          id=$(curl -fsS -X POST localhost:3000/items \
+                -H 'content-type: application/json' \
+                -d '{"name":"ci item"}' | jq -r .id)
+          curl -fsS localhost:3000/items/$id
+          curl -fsS -X PUT localhost:3000/items/$id \
+                -H 'content-type: application/json' \
+                -d '{"description":"updated"}'
+          curl -fsS -X DELETE localhost:3000/items/$id
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/items/$id)" = "404"
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

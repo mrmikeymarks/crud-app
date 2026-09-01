@@ -1,0 +1,12 @@
+# Anything here is NOT sent to the Docker daemon on `docker build`.
+# Keeps the build context small and stops secrets/host artefacts leaking into the image.
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.*
+*.md
+compose*.yaml
+Dockerfile
+.dockerignore

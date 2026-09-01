@@ -1,0 +1,16 @@
+{
+  "name": "crud-app",
+  "version": "1.0.0",
+  "description": "Minimal Express + Postgres CRUD API, containerised with Docker Compose",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}
