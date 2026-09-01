@@ -12,7 +12,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create .env for CI
-        run: cp .env.example .env
+        # The pgdata volume binds to a host directory (PGDATA_DIR). The default in
+        # .env.example is a path on the dev machine, so point it at a runner-local
+        # directory instead and make sure it exists before `compose up`.
+        run: |
+          cp .env.example .env
+          mkdir -p "$RUNNER_TEMP/pgdata"
+          sed -i "s#^PGDATA_DIR=.*#PGDATA_DIR=$RUNNER_TEMP/pgdata#" .env
+          grep PGDATA_DIR .env
 
       - name: Build image and start stack
         run: docker compose -f compose.yaml up -d --build --wait
