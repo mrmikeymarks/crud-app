@@ -8,7 +8,9 @@ reference for how a typical containerised web app fits together.
 crud-app/
 ├── Dockerfile               # how to build the API image (multi-stage)
 ├── compose.yaml             # the stack: api + db, network, volume
-├── compose.override.yaml    # dev-only extras (live reload, Adminer, NocoDB); auto-merged
+├── compose.override.yaml    # dev-only extras (live reload, GUI gateway, Adminer, NocoDB); auto-merged
+├── devproxy/
+│   └── Caddyfile            # auth + reverse proxy config for the dev GUI gateway
 ├── .env.example             # template for secrets/config -> copy to .env
 ├── .dockerignore            # what NOT to send into the image build
 ├── .gitignore
@@ -123,33 +125,59 @@ so production never reads source from the host or from git at run time.
 
 ## Database GUIs (development only)
 
-`compose.override.yaml` also starts two tools for looking at and editing the data.
-They are absent when you deploy with `-f compose.yaml`.
+`compose.override.yaml` also starts two tools for looking at and editing the data,
+behind a small authenticated gateway. None of this exists when you deploy with
+`-f compose.yaml`.
 
-Which host address they listen on is controlled by `GUI_BIND_ADDR` in `.env`:
-
-* `127.0.0.1` (the default in `.env.example`) – only a browser on this machine can reach them.
-* your LAN IP, e.g. `192.168.1.50` – any device on the local network can reach them.
-  Fine on a trusted home network; do not do this on shared Wi-Fi.
-* a VPN address (Tailscale, WireGuard) – reachable from your devices anywhere, and nothing else.
-
-Docker publishes ports with its own iptables rules that bypass host firewalls such as
-ufw, so the bind address is the thing that actually limits exposure. If the machine
-gets its address from DHCP, reserve it in your router so the IP does not change; a
-stale address makes the containers fail to start with "cannot assign requested address".
+```
+LAN ──▶ devproxy (Caddy, :8080 / :8081, username + password) ──▶ Adminer / NocoDB ──▶ db
+        the ONLY service with published ports                   no published ports
+        on the `tools` network only, cannot see `db`            on `tools` + `backend`
+```
 
 | Tool | URL | What it is good for |
 |---|---|---|
-| Adminer | http://GUI_BIND_ADDR:8080 | Quick SQL console and table browser. Log in with System **PostgreSQL**, Server `db`, and the user/password/database from `.env`. |
+| Adminer | http://GUI_BIND_ADDR:8080 | Quick SQL console and table browser. After the gateway login, choose System **PostgreSQL**, Server `db`, and the user/password/database from `.env`. |
 | NocoDB | http://GUI_BIND_ADDR:8081 | Airtable-style spreadsheet, forms, kanban and gallery views over the same tables. |
 
-NocoDB first-time setup: create the admin account, then **New base → Connect external
-data → PostgreSQL** with host `db`, port `5432`, and the user, password and database
-from `.env`. NocoDB stores its own metadata (accounts, bases, views) in the
-`nocodb_data` volume, separate from the application database.
+Why a gateway rather than publishing the tools directly:
 
-If you would rather start these only on demand, add `profiles: [tools]` to each
-service and run `docker compose --profile tools up`.
+* Adminer has no login of its own beyond the database password, and NocoDB's first-run
+  admin signup is open to whoever gets there first. The gateway puts a password in front
+  of both.
+* The tools have no `ports:` at all, so there is no way to reach them except through
+  the gateway. Docker publishes ports with iptables rules that bypass host firewalls
+  such as ufw, so "no published port" is the reliable form of "not exposed".
+* The gateway sits on its own `tools` network with just the two GUIs. Even if it were
+  compromised it cannot reach `db` or `api`.
+
+Settings in `.env`:
+
+* `GUI_BIND_ADDR` – host address the gateway listens on. `127.0.0.1` (the default in
+  `.env.example`) is this machine only; a LAN IP lets other devices on the network in;
+  a VPN address (Tailscale, WireGuard) lets only your devices in. If the machine gets
+  its address from DHCP, reserve it in the router: a stale address makes the container
+  fail with "cannot assign requested address".
+* `GUI_AUTH_USER` / `GUI_AUTH_HASH` – the gateway login. Generate the hash with
+
+  ```bash
+  docker run --rm caddy:2-alpine caddy hash-password --plaintext 'your-password'
+  ```
+
+  and keep the single quotes around it in `.env`, because bcrypt hashes contain `$`.
+
+The gateway config is `devproxy/Caddyfile`. It speaks plain HTTP, which is fine on a
+trusted LAN. For HTTPS with a locally-trusted certificate, remove `auto_https off`, add
+`tls internal` to each site block, mount a `caddy_data` volume at `/data`, and change
+`NC_PUBLIC_URL` to `https://`.
+
+NocoDB first-time setup: log in to the gateway, create the NocoDB admin account, then
+**New base → Connect external data → PostgreSQL** with host `db`, port `5432`, and the
+user, password and database from `.env`. NocoDB stores its own metadata (accounts,
+bases, views) in the `nocodb_data` volume, separate from the application database.
+
+If you would rather start the tooling only on demand, add `profiles: [tools]` to the
+three services and run `docker compose --profile tools up`.
 
 ## .env and secrets
 
