@@ -1,5 +1,4 @@
-# Anything here is NOT sent to the Docker daemon on `docker build`.
-# Keeps the build context small and stops secrets/host artefacts leaking into the image.
+# Never sent to the image build. Explained in README.md ("From development to production").
 node_modules
 npm-debug.log
 .git
@@ -10,3 +9,7 @@ npm-debug.log
 compose*.yaml
 Dockerfile
 .dockerignore
+.github
+db
+devproxy
+data

@@ -1,23 +1,18 @@
-# Dev-only gateway. The ONLY container that publishes the GUI ports on the host.
-# Everything behind it (Adminer, NocoDB) has no `ports:` at all, so the login
-# below is the sole way in. Credentials come from GUI_AUTH_USER / GUI_AUTH_HASH
-# in .env; Caddy substitutes {$VAR} placeholders at startup.
+# Optional dev gateway: basic auth in front of Adminer (:8080) and NocoDB (:8081).
+# Enabled by uncommenting `devproxy` in compose.override.yaml. See README.md.
 {
-	admin off # no Caddy admin API listening inside the container
-	auto_https off # plain HTTP on a LAN IP; see README for enabling TLS
+	admin off
+	auto_https off
 }
 
-# Reusable snippet: HTTP Basic Auth against the bcrypt hash from .env
 (auth) {
 	basic_auth {
 		{$GUI_AUTH_USER} {$GUI_AUTH_HASH}
 	}
 }
 
-# ---- Adminer on host port 8080 ----
 :8080 {
 	handle /healthz {
-		# unauthenticated, used by the Docker healthcheck only
 		respond "ok" 200
 	}
 	handle {
@@ -26,13 +21,12 @@
 	}
 }
 
-# ---- NocoDB on host port 8081 ----
 :8081 {
 	handle /healthz {
 		respond "ok" 200
 	}
 	handle {
 		import auth
-		reverse_proxy nocodb:8080 # websockets are proxied automatically
+		reverse_proxy nocodb:8080
 	}
 }

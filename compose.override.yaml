@@ -1,76 +1,35 @@
-# Compose automatically merges this file on top of compose.yaml when you run
-# plain `docker compose up`. It is for LOCAL DEVELOPMENT only. In production
-# run `docker compose -f compose.yaml up -d` to ignore it.
-#
-# Layout of the dev-only tooling:
-#
-#   LAN  ──▶  devproxy (:8080, :8081, basic auth)  ──▶  adminer / nocodb  ──▶  db
-#             only service with published ports       no published ports
-#             on the `tools` network only              on `tools` + `backend`
-#
+# Dev-only additions, merged automatically by `docker compose up`.
+# Skip with `docker compose -f compose.yaml up`. Explained in README.md ("Development override").
 services:
   api:
-    # Bind-mount source so edits on the host are seen inside the container...
     volumes:
       - ./src:/app/src:ro
-    # ...and use node's --watch flag to restart on change.
     command: ["node", "--watch", "src/server.js"]
     environment:
       NODE_ENV: development
 
-  # ---------------- Gateway ----------------
-  # The single entry point for the GUIs. Requires a username/password
-  # (GUI_AUTH_USER / GUI_AUTH_HASH in .env) before forwarding any request.
-  devproxy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      # GUI_BIND_ADDR comes from .env (LAN IP, VPN IP, or 127.0.0.1 for local-only).
-      - "${GUI_BIND_ADDR:-127.0.0.1}:8080:8080"   # -> adminer
-      - "${GUI_BIND_ADDR:-127.0.0.1}:8081:8081"   # -> nocodb
-    environment:
-      GUI_AUTH_USER: ${GUI_AUTH_USER:-admin}
-      GUI_AUTH_HASH: ${GUI_AUTH_HASH}
-    volumes:
-      - ./devproxy/Caddyfile:/etc/caddy/Caddyfile:ro
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 10s
-      timeout: 3s
-      start_period: 5s
-      retries: 3
-    depends_on:
-      - adminer
-      - nocodb
-    networks:
-      - tools            # deliberately NOT on `backend`: the proxy cannot reach db
-
-  # ---------------- GUIs (no published ports) ----------------
   adminer:
     image: adminer:4
     restart: unless-stopped
+    ports:
+      - "${GUI_BIND_ADDR:-127.0.0.1}:8080:8080"
     environment:
       ADMINER_DEFAULT_SERVER: db
     depends_on:
       db:
         condition: service_healthy
     networks:
-      - backend          # to reach db
-      - tools            # to be reached by devproxy
+      - backend
 
-  # NocoDB: Airtable-style spreadsheet UI over the Postgres data.
-  # First run: open http://<GUI_BIND_ADDR>:8081, log in to the proxy, create the
-  # NocoDB admin account, then "New base" -> "Connect external data" -> PostgreSQL
-  #   host: db  port: 5432  user/password/database: values from .env
   nocodb:
-    image: nocodb/nocodb:latest        # pin to a specific tag once you settle on a version
+    image: nocodb/nocodb:latest
     restart: unless-stopped
+    ports:
+      - "${GUI_BIND_ADDR:-127.0.0.1}:8081:8080"
     environment:
-      NC_DISABLE_TELE: "true"          # opt out of usage telemetry
-      NC_PUBLIC_URL: http://${GUI_BIND_ADDR:-127.0.0.1}:8081   # NocoDB builds links/redirects from this
+      NC_DISABLE_TELE: "true"
+      NC_PUBLIC_URL: http://${GUI_BIND_ADDR:-127.0.0.1}:8081
     volumes:
-      # NocoDB keeps its own metadata (users, bases, views) in a SQLite file here.
-      # Kept separate from the app database so it never pollutes the `app` schema.
       - nocodb_data:/usr/app/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health"]
@@ -83,11 +42,35 @@ services:
         condition: service_healthy
     networks:
       - backend
-      - tools
+
+  # Optional authenticated gateway (Caddy). Disabled for now.
+  # To enable, follow README.md ("Optional: Caddy gateway").
+  # devproxy:
+  #   image: caddy:2-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "${GUI_BIND_ADDR:-127.0.0.1}:8080:8080"
+  #     - "${GUI_BIND_ADDR:-127.0.0.1}:8081:8081"
+  #   environment:
+  #     GUI_AUTH_USER: ${GUI_AUTH_USER:-admin}
+  #     GUI_AUTH_HASH: ${GUI_AUTH_HASH}
+  #   volumes:
+  #     - ./devproxy/Caddyfile:/etc/caddy/Caddyfile:ro
+  #   healthcheck:
+  #     test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     start_period: 5s
+  #     retries: 3
+  #   depends_on:
+  #     - adminer
+  #     - nocodb
+  #   networks:
+  #     - tools
 
 volumes:
   nocodb_data:
 
-# Private network shared only by the gateway and the GUIs it fronts.
-networks:
-  tools:
+# Uncomment together with devproxy.
+# networks:
+#   tools:

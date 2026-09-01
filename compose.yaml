@@ -1,44 +1,33 @@
-# Docker Compose v2 file. No top-level `version:` key is needed any more.
+# Production stack: api + db. Explained in README.md ("compose.yaml").
 name: crud-app
 
 services:
-  # ---------------- Application ----------------
   api:
-    # Build the image from the Dockerfile in this directory.
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: crud-app-api:latest          # name to tag the built image with
-    restart: unless-stopped             # come back after crashes/reboots, but not after `compose stop`
+    build: .
+    restart: unless-stopped
     ports:
-      - "${API_PORT:-3000}:3000"        # HOST:CONTAINER. Left side comes from .env, defaults to 3000
+      - "${API_PORT:-3000}:3000"
     environment:
-      # Values on the right are read from the .env file next to this compose.yaml.
-      DB_HOST: db                        # service name below; Compose provides DNS for it
+      DB_HOST: db
       DB_PORT: 5432
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_NAME: ${POSTGRES_DB}
     depends_on:
       db:
-        condition: service_healthy      # wait for the DB healthcheck, not just "container started"
+        condition: service_healthy
     networks:
       - backend
 
-  # ---------------- Database ----------------
   db:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      # These three are the official image's own variables; they create the
-      # role and database on first start.
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      # Named volume: data survives `docker compose down` and image upgrades.
       - pgdata:/var/lib/postgresql/data
-      # Bind mount: any *.sql in this folder runs once on a fresh volume.
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
@@ -47,24 +36,13 @@ services:
       retries: 10
     networks:
       - backend
-    # Intentionally NO `ports:` here. The DB is reachable only from other
-    # containers on the `backend` network, never from the host or internet.
-    # Uncomment to connect with a local GUI client:
-    # ports:
-    #   - "127.0.0.1:5432:5432"
 
-# A named volume, but pinned to a host directory of our choosing instead of
-# Docker's default location. This keeps Docker's ownership/permission handling
-# while letting you back up or snapshot the files with normal host tools.
-# The directory must exist before the first `docker compose up`.
 volumes:
   pgdata:
-    driver: local
     driver_opts:
       type: none
       o: bind
-      device: ${PGDATA_DIR:-/home/mike/docker/data/crud-app/pgdata}
+      device: ${PGDATA_DIR:?set PGDATA_DIR in .env to an existing absolute path}
 
-# A private bridge network. Containers on it can reach each other by service name.
 networks:
   backend:

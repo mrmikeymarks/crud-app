@@ -4,7 +4,7 @@ import { pool } from "./db.js";
 const app = express();
 app.use(express.json()); // parse JSON request bodies
 
-// Used by the Dockerfile HEALTHCHECK and by Compose's depends_on condition.
+// Used by the Dockerfile HEALTHCHECK (and therefore by `docker compose up --wait`).
 app.get("/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
