@@ -124,13 +124,24 @@ so production never reads source from the host or from git at run time.
 ## Database GUIs (development only)
 
 `compose.override.yaml` also starts two tools for looking at and editing the data.
-They are bound to `127.0.0.1` so they are never reachable from the network, and they
-are absent when you deploy with `-f compose.yaml`.
+They are absent when you deploy with `-f compose.yaml`.
+
+Which host address they listen on is controlled by `GUI_BIND_ADDR` in `.env`:
+
+* `127.0.0.1` (the default in `.env.example`) – only a browser on this machine can reach them.
+* your LAN IP, e.g. `192.168.1.50` – any device on the local network can reach them.
+  Fine on a trusted home network; do not do this on shared Wi-Fi.
+* a VPN address (Tailscale, WireGuard) – reachable from your devices anywhere, and nothing else.
+
+Docker publishes ports with its own iptables rules that bypass host firewalls such as
+ufw, so the bind address is the thing that actually limits exposure. If the machine
+gets its address from DHCP, reserve it in your router so the IP does not change; a
+stale address makes the containers fail to start with "cannot assign requested address".
 
 | Tool | URL | What it is good for |
 |---|---|---|
-| Adminer | http://localhost:8080 | Quick SQL console and table browser. Log in with System **PostgreSQL**, Server `db`, and the user/password/database from `.env`. |
-| NocoDB | http://localhost:8081 | Airtable-style spreadsheet, forms, kanban and gallery views over the same tables. |
+| Adminer | http://GUI_BIND_ADDR:8080 | Quick SQL console and table browser. Log in with System **PostgreSQL**, Server `db`, and the user/password/database from `.env`. |
+| NocoDB | http://GUI_BIND_ADDR:8081 | Airtable-style spreadsheet, forms, kanban and gallery views over the same tables. |
 
 NocoDB first-time setup: create the admin account, then **New base → Connect external
 data → PostgreSQL** with host `db`, port `5432`, and the user, password and database
